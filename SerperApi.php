@@ -1,85 +1,100 @@
 <?php
+/**
+ * Plugin Name: Serper Location Importer
+ */
 
-// ثبت پست تایپ
-add_action('init', function() {
-    register_post_type('location', array(
-        'labels' => array(
-            'name' => 'مکان‌ها',
-            'singular_name' => 'مکان',
-        ),
-        'public' => true,
-        'has_archive' => true,
-        'supports' => array('title', 'editor'),
-    ));
-});
+class SerperLocationPlugin {
 
-// اتصال به API سرپر
-function fetch_locations_from_serper($search_query) {
-    $api_key = 'b8a887af3d7049d920a945110f7c06cf7cfa1da0'; // کلید API سرپر رو اینجا بذار
-    $url = 'https://google.serper.dev/maps';
+    private $api_key = 'b8a887af3d7049d920a945110f7c06cf7cfa1da0';
 
-    $data = array(
-        'q' => $search_query,
-        'gl' => 'ir',
-        'hl' => 'fa'
-    );
-
-    $args = array(
-        'method' => 'POST',
-        'headers' => array(
-            'X-API-KEY' => $api_key,
-            'Content-Type' => 'application/json',
-        ),
-        'body' => json_encode($data),
-    );
-
-    $response = wp_remote_request($url, $args);
-    if (is_wp_error($response)) {
-        return false;
+    public function __construct() {
+        add_action('init', [$this, 'register_post_type']);
+        add_action('admin_post_fetch_locations', [$this, 'handle_form']);
+        add_shortcode('location_search', [$this, 'render_search_form']);
     }
 
-    $body = wp_remote_retrieve_body($response);
-    return json_decode($body, true);
-}
+    public function register_post_type() {
+        register_post_type('location', [
+            'labels' => [
+                'name' => 'مکان‌ها',
+                'singular_name' => 'مکان',
+            ],
+            'public' => true,
+            'has_archive' => true,
+            'supports' => ['title', 'editor'],
+        ]);
 
-// پردازش و ساخت پست
-add_action('init', function() {
-    if (isset($_POST['search_title'])) {
-        $search_query = sanitize_text_field($_POST['search_title']);
-        $results = fetch_locations_from_serper($search_query);
+        register_post_meta('location', 'address', ['show_in_rest' => true, 'single' => true, 'type' => 'string']);
+        register_post_meta('location', 'cid', ['show_in_rest' => true, 'single' => true, 'type' => 'string']);
+    }
+
+    public function render_search_form() {
+        ob_start();
+        ?>
+        <form method="POST" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+            <input type="hidden" name="action" value="fetch_locations">
+            <?php wp_nonce_field('serper_search_nonce', 'serper_nonce'); ?>
+            <input type="text" name="search_title" placeholder="مثلا: بهترین رستوران‌های مشهد" required>
+            <button type="submit">جستجو</button>
+        </form>
+        <?php
+        return ob_get_clean();
+    }
+
+    public function handle_form() {
+        if (!current_user_can('manage_options')) {
+            wp_die('دسترسی غیرمجاز');
+        }
+
+        if (!isset($_POST['serper_nonce']) || !wp_verify_nonce($_POST['serper_nonce'], 'serper_search_nonce')) {
+            wp_die('درخواست نامعتبر');
+        }
+
+        $query = sanitize_text_field($_POST['search_title']);
+        $results = $this->fetch_locations_from_serper($query);
 
         if ($results && !empty($results['places'])) {
             foreach ($results['places'] as $place) {
-                $post_id = wp_insert_post(array(
-                    'post_title'   => $place['title'],
-                    'post_type'    => 'location',
-                    'post_status'  => 'publish',
-                ));
+                $post_id = wp_insert_post([
+                    'post_title'  => $place['title'],
+                    'post_type'   => 'location',
+                    'post_status' => 'publish',
+                ]);
 
-                $addresses = array(
+                update_post_meta($post_id, 'address', json_encode([
                     'lat' => $place['latitude'],
                     'lng' => $place['longitude']
-                );
-                $addresses = json_encode($addresses);
+                ]));
 
-                update_post_meta($post_id, 'address', $addresses);
                 update_post_meta($post_id, 'cid', $place['cid']);
             }
-            echo "پست‌ها با موفقیت ساخته شدند!";
+            wp_redirect(add_query_arg('success', '1', wp_get_referer()));
+            exit;
         } else {
-//             echo "مکانی پیدا نشد یا خطایی رخ داد.";
+            wp_redirect(add_query_arg('error', '1', wp_get_referer()));
+            exit;
         }
     }
-});
 
-// شورت‌کد فرم
-add_shortcode('location_search', function() {
-    ob_start();
-    ?>
-    <form method="POST" action="">
-        <input type="text" name="search_title" placeholder="مثلا: بهترین رستوران‌های مشهد" required>
-        <button type="submit">جستجو</button>
-    </form>
-    <?php
-    return ob_get_clean();
-});
+    private function fetch_locations_from_serper($search_query) {
+        $response = wp_remote_post('https://google.serper.dev/maps', [
+            'headers' => [
+                'X-API-KEY' => $this->api_key,
+                'Content-Type' => 'application/json',
+            ],
+            'body' => json_encode([
+                'q' => $search_query,
+                'gl' => 'ir',
+                'hl' => 'fa',
+            ]),
+        ]);
+
+        if (is_wp_error($response)) {
+            return false;
+        }
+
+        return json_decode(wp_remote_retrieve_body($response), true);
+    }
+}
+
+new SerperLocationPlugin();
